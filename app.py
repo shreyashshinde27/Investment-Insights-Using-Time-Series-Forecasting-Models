@@ -289,6 +289,23 @@ class StockAnalyzer:
     def get_stock_info(self, symbol):
         """Get basic stock information"""
         try:
+            # Mutual Fund scheme codes (India): MF:<scheme_code>
+            if isinstance(symbol, str) and symbol.startswith("MF:"):
+                scheme_code = symbol.split("MF:", 1)[1].strip()
+                mf = self.get_mutual_fund_current_nav(scheme_code)
+                if not mf:
+                    return None
+                return {
+                    "name": mf.get("name", f"MF:{scheme_code}"),
+                    "sector": "N/A",
+                    "industry": "N/A",
+                    "market_cap": 0,
+                    "pe_ratio": "N/A",
+                    "dividend_yield": 0,
+                    "dividend_rate": 0,
+                    "current_price": mf.get("current_price", 0),
+                }
+
             ticker = yf.Ticker(symbol)
             info = ticker.info
             return {
@@ -303,6 +320,38 @@ class StockAnalyzer:
             }
         except Exception as e:
             st.error(f"Error fetching info for {symbol}: {str(e)}")
+            return None
+
+    def get_mutual_fund_current_nav(self, scheme_code):
+        """Fetch latest NAV for an Indian mutual fund scheme code (as 'current price')."""
+        try:
+            import requests
+
+            url = f"https://api.mfapi.in/mf/{scheme_code}"
+            resp = requests.get(url, timeout=60)
+            resp.raise_for_status()
+            payload = resp.json()
+
+            meta = payload.get("meta", {}) or {}
+            scheme_name = meta.get("scheme_name") or meta.get("schemeName") or ""
+
+            data = payload.get("data", [])
+            if not data:
+                return None
+
+            df = pd.DataFrame(data)
+            if "date" not in df.columns or "nav" not in df.columns:
+                return None
+
+            df["date"] = pd.to_datetime(df["date"], format="%d-%m-%Y", errors="coerce")
+            df["nav"] = pd.to_numeric(df["nav"], errors="coerce")
+            df = df.dropna(subset=["date", "nav"]).sort_values("date")
+            if df.empty:
+                return None
+
+            latest_nav = float(df["nav"].iloc[-1])
+            return {"name": scheme_name.strip() or f"MF:{scheme_code}", "current_price": latest_nav}
+        except Exception:
             return None
     
     def get_market_overview(self):
@@ -639,22 +688,26 @@ def show_stock_analysis(analyzer, start_date, end_date):
         # Stock info
         info = analyzer.get_stock_info(symbol)
         if info:
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Current Price", f"₹{info['current_price']:.2f}")
-            with col2:
-                st.metric("Market Cap", format_market_cap(info['market_cap']))
-            with col3:
-                st.metric("P/E Ratio", format_pe_ratio(info['pe_ratio']))
-            with col4:
-                st.metric(
-                    "Dividend Yield",
-                    format_dividend_yield(
-                        info.get('dividend_yield'),
-                        dividend_rate=info.get('dividend_rate'),
-                        current_price=info.get('current_price')
+            # Mutual funds: only show "Current Price" (latest NAV). Skip stock-only fields.
+            if isinstance(symbol, str) and symbol.startswith("MF:"):
+                st.metric("Current Price (NAV)", f"₹{info.get('current_price', 0):.2f}")
+            else:
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Current Price", f"₹{info['current_price']:.2f}")
+                with col2:
+                    st.metric("Market Cap", format_market_cap(info['market_cap']))
+                with col3:
+                    st.metric("P/E Ratio", format_pe_ratio(info['pe_ratio']))
+                with col4:
+                    st.metric(
+                        "Dividend Yield",
+                        format_dividend_yield(
+                            info.get('dividend_yield'),
+                            dividend_rate=info.get('dividend_rate'),
+                            current_price=info.get('current_price')
+                        )
                     )
-                )
         
         # Charts: show three charts with minimal modebar and dark theme
         config = {
