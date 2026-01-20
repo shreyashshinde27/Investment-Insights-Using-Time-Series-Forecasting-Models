@@ -558,8 +558,8 @@ def main():
             "Main Menu",
             [
                 "🏠 Dashboard",
-                "🔍 Stock Analysis",
-                "🔮 Stock Prediction",
+                "🔍 Price Analysis",
+                "🔮 Price Prediction",
                 "📊 Portfolio Analysis",
                 "ℹ️ About"
             ],
@@ -585,9 +585,9 @@ def main():
     # Main content based on selection
     if selected == "🏠 Dashboard":
         show_dashboard(analyzer, start_date, end_date)
-    elif selected == "🔍 Stock Analysis":
+    elif selected == "🔍 Price Analysis":
         show_stock_analysis(analyzer, start_date, end_date)
-    elif selected == "🔮 Stock Prediction":
+    elif selected == "🔮 Price Prediction":
         show_stock_prediction(analyzer, start_date, end_date)
     elif selected == "📊 Portfolio Analysis":
         show_portfolio_analysis(analyzer, start_date, end_date)
@@ -658,25 +658,47 @@ def show_dashboard(analyzer, start_date, end_date):
 ## Stock comparison feature removed as per request
 
 def show_stock_analysis(analyzer, start_date, end_date):
-    """Detailed analysis of a single stock"""
-    st.header("🔍 Individual Stock Analysis")
+    """Detailed price analysis of a single asset"""
+    st.header("🔍 Individual Price Analysis")
     
     if analyzer.ticker_data.empty:
         st.error("No ticker data available")
         return
-    
-    # Stock selection
-    tickers = analyzer.ticker_data["Company Name"].tolist()
-    selected_stock = st.selectbox('Select a stock:', tickers)
-    
-    if not selected_stock:
-        st.warning("Please select a stock")
-        return
-    
+
+    # Build lookup once
     symbol_dict = dict(zip(analyzer.ticker_data["Company Name"], analyzer.ticker_data["Symbol"]))
-    symbol = symbol_dict[selected_stock]
-    
-    with st.spinner('Loading stock data...'):
+    all_names = analyzer.ticker_data["Company Name"].tolist()
+
+    # Smooth selection UX: use a form so typing/clearing doesn't rerun the app on every keypress
+    with st.form("price_analysis_picker"):
+        query = st.text_input("Search asset name (stocks + mutual funds)", value="", placeholder="Type to search…")
+
+        # Filter client-side and cap results for responsiveness
+        q = query.strip().lower()
+        if q:
+            filtered = [n for n in all_names if q in n.lower()]
+        else:
+            filtered = all_names
+        if len(filtered) > 300:
+            filtered = filtered[:300]
+            st.caption("Showing first 300 matches. Narrow your search for more.")
+
+        selected_stock = st.selectbox("Select an asset", filtered, index=0 if filtered else None)
+        submitted = st.form_submit_button("Analyze Price")
+
+    if not submitted:
+        return
+
+    if not selected_stock:
+        st.warning("Please select an asset")
+        return
+
+    symbol = symbol_dict.get(selected_stock)
+    if not symbol:
+        st.error("Could not resolve symbol for the selected asset.")
+        return
+
+    with st.spinner('Loading asset data...'):
         # Fetch data
         data = analyzer.get_stock_data(symbol, start_date, end_date)
         if data is None:
@@ -685,7 +707,7 @@ def show_stock_analysis(analyzer, start_date, end_date):
         # Add technical indicators
         data = analyzer.calculate_technical_indicators(data)
         
-        # Stock info
+        # Asset info
         info = analyzer.get_stock_info(symbol)
         if info:
             # Mutual funds: only show "Current Price" (latest NAV). Skip stock-only fields.
@@ -708,7 +730,7 @@ def show_stock_analysis(analyzer, start_date, end_date):
                             current_price=info.get('current_price')
                         )
                     )
-        
+
         # Charts: show three charts with minimal modebar and dark theme
         config = {
             'modeBarButtonsToRemove': [
@@ -789,7 +811,10 @@ def show_stock_analysis(analyzer, start_date, end_date):
             st.plotly_chart(ma_fig, use_container_width=True, config=config)
 
             # 3) Volume Chart
-            if 'Volume' in clean_data.columns and not clean_data['Volume'].isna().all():
+            # Mutual funds: skip volume chart
+            if isinstance(symbol, str) and symbol.startswith("MF:"):
+                pass
+            elif 'Volume' in clean_data.columns and not clean_data['Volume'].isna().all():
                 vol_fig = go.Figure()
                 vol_fig.add_trace(go.Bar(
                     x=clean_data.index, 
@@ -815,8 +840,8 @@ def show_stock_analysis(analyzer, start_date, end_date):
             st.error("Please try selecting a different stock or check your data connection.")
 
 def show_stock_prediction(analyzer, start_date, end_date):
-    """Stock price prediction using Prophet"""
-    st.header("🔮 Stock Price Prediction")
+    """Price prediction using Prophet"""
+    st.header("🔮 Price Prediction")
     
     if analyzer.ticker_data.empty:
         st.error("No ticker data available")
@@ -929,9 +954,9 @@ def show_about():
     ### ✨ Features
     
     - **📊 Dashboard**: Market overview and key metrics
-    - **📈 Stock Comparison**: Compare multiple stocks side by side
-    - **🔍 Stock Analysis**: Detailed technical analysis with indicators
-    - **🔮 Stock Prediction**: AI-powered price forecasting using Prophet
+    - **📈 Stock Comparison**: Compare multiple assets side by side
+    - **🔍 Price Analysis**: Detailed technical analysis with indicators
+    - **🔮 Price Prediction**: AI-powered price forecasting using Prophet
     - **📊 Portfolio Analysis**: Portfolio optimization and risk analysis
     
     ### 🛠️ Built With
