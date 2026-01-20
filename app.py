@@ -158,8 +158,18 @@ class StockAnalyzer:
         self.ticker_data = self.load_ticker_data()
     
     def get_stock_data(self, symbol, start_date, end_date):
-        """Fetch stock data from Yahoo Finance"""
+        """Fetch data for a symbol.
+
+        Supported formats:
+        - Regular tickers (e.g., RELIANCE.NS) via Yahoo Finance.
+        - Indian mutual funds as MF:<scheme_code> via mfapi.in NAV history.
+        """
         try:
+            # Mutual Fund scheme codes (India): MF:<scheme_code>
+            if isinstance(symbol, str) and symbol.startswith("MF:"):
+                scheme_code = symbol.split("MF:", 1)[1].strip()
+                return self.get_mutual_fund_nav_history(scheme_code, start_date, end_date)
+
             data = yf.download(symbol, start=start_date, end=end_date, progress=False)
             if data.empty:
                 st.error(f"No data found for {symbol}")
@@ -183,6 +193,54 @@ class StockAnalyzer:
             return data
         except Exception as e:
             st.error(f"Error fetching data for {symbol}: {str(e)}")
+            return None
+
+    def get_mutual_fund_nav_history(self, scheme_code, start_date, end_date):
+        """Fetch Indian mutual fund NAV history and map into OHLC-like dataframe.
+
+        Source: mfapi.in (community API). Returns daily NAV values with dates.
+        """
+        try:
+            import requests
+
+            url = f"https://api.mfapi.in/mf/{scheme_code}"
+            resp = requests.get(url, timeout=60)
+            resp.raise_for_status()
+            payload = resp.json()
+
+            data = payload.get("data", [])
+            if not data:
+                st.error(f"No NAV data found for MF:{scheme_code}")
+                return None
+
+            df = pd.DataFrame(data)
+            # Expected keys: "date" (DD-MM-YYYY) and "nav" (string float)
+            if "date" not in df.columns or "nav" not in df.columns:
+                st.error(f"Unexpected NAV response format for MF:{scheme_code}")
+                return None
+
+            df["date"] = pd.to_datetime(df["date"], format="%d-%m-%Y", errors="coerce")
+            df["nav"] = pd.to_numeric(df["nav"], errors="coerce")
+            df = df.dropna(subset=["date", "nav"]).sort_values("date")
+            df = df.set_index("date")
+
+            # Filter date range
+            df = df.loc[(df.index >= pd.to_datetime(start_date)) & (df.index <= pd.to_datetime(end_date))]
+            if df.empty:
+                st.error(f"No NAV data in the selected date range for MF:{scheme_code}")
+                return None
+
+            # Map NAV into OHLC schema to keep downstream indicators working.
+            out = pd.DataFrame(index=df.index)
+            out["Open"] = df["nav"]
+            out["High"] = df["nav"]
+            out["Low"] = df["nav"]
+            out["Close"] = df["nav"]
+            out["Adj Close"] = df["nav"]
+            out["Volume"] = 0
+            return out
+        except Exception as e:
+            st.error(f"Error fetching NAV for MF:{scheme_code}: {str(e)}")
             return None
     
     def calculate_technical_indicators(self, data):
