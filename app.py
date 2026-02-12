@@ -916,30 +916,208 @@ def show_stock_prediction(analyzer, start_date, end_date):
 def show_portfolio_analysis(analyzer, start_date, end_date):
     """Portfolio analysis and optimization"""
     st.header("📊 Portfolio Analysis")
-    
-    st.info("Portfolio analysis feature coming soon! This will include portfolio optimization, risk analysis, and performance attribution.")
-    
-    # Placeholder for future portfolio features
+
+    if analyzer.ticker_data.empty:
+        st.error("No ticker data available")
+        return
+
+    st.caption("Optimize a long-only portfolio (weights sum to 1) using a Monte Carlo mean-variance search.")
+
+    # --- Asset selection (smooth UX)
+    symbol_dict = dict(zip(analyzer.ticker_data["Company Name"], analyzer.ticker_data["Symbol"]))
+    all_names = analyzer.ticker_data["Company Name"].tolist()
+
+    with st.form("portfolio_builder"):
+        query = st.text_input(
+            "Search assets to add (stocks + mutual funds)",
+            value="",
+            placeholder="Type to filter…",
+        )
+        q = query.strip().lower()
+        if q:
+            filtered = [n for n in all_names if q in n.lower()]
+        else:
+            filtered = all_names
+        if len(filtered) > 300:
+            filtered = filtered[:300]
+            st.caption("Showing first 300 matches. Narrow your search for more.")
+
+        selected_assets = st.multiselect("Select assets", options=filtered, default=[])
+
+        colA, colB, colC = st.columns(3)
+        with colA:
+            objective = st.selectbox("Objective", ["Max Sharpe", "Min Volatility", "Max Return"], index=0)
+        with colB:
+            risk_free_rate = st.number_input("Risk-free rate (annual, %)", min_value=0.0, max_value=25.0, value=6.0, step=0.5)
+        with colC:
+            n_portfolios = st.slider("Random portfolios", min_value=2000, max_value=30000, value=12000, step=2000)
+
+        colX, colY = st.columns(2)
+        with colX:
+            initial_capital = st.number_input("Initial capital (₹)", min_value=1000.0, value=100000.0, step=1000.0)
+        with colY:
+            max_assets = st.slider("Max assets to optimize", min_value=2, max_value=20, value=10)
+
+        run_opt = st.form_submit_button("Run Portfolio Optimization")
+
+    if not run_opt:
+        return
+
+    if len(selected_assets) < 2:
+        st.warning("Select at least 2 assets to optimize.")
+        return
+
+    # Cap count for runtime / API stability
+    selected_assets = selected_assets[:max_assets]
+    symbols = [symbol_dict.get(n) for n in selected_assets]
+    if any(s is None for s in symbols):
+        st.error("One or more selected assets could not be resolved to a symbol.")
+        return
+
+    rf = float(risk_free_rate) / 100.0
+
+    @st.cache_data(show_spinner=False)
+    def _fetch_price_series(symbol, start_date_str, end_date_str):
+        data = analyzer.get_stock_data(symbol, start_date_str, end_date_str)
+        if data is None or getattr(data, "empty", True):
+            return None
+        if "Adj Close" in data.columns:
+            s = data["Adj Close"].copy()
+        elif "Close" in data.columns:
+            s = data["Close"].copy()
+        else:
+            return None
+        s = s.dropna()
+        s.name = symbol
+        return s
+
+    with st.spinner("Fetching price history..."):
+        series_list = []
+        for sym in symbols:
+            s = _fetch_price_series(sym, str(start_date), str(end_date))
+            if s is not None and not s.empty:
+                series_list.append(s)
+
+    if len(series_list) < 2:
+        st.error("Not enough valid price series found for optimization. Try different assets or a wider date range.")
+        return
+
+    prices = pd.concat(series_list, axis=1).sort_index()
+    # Keep only rows where all assets have data (simple + robust)
+    prices = prices.dropna(how="any")
+    if len(prices) < 30:
+        st.error("Not enough overlapping price history across selected assets (need ~30+ data points).")
+        return
+
+    returns = prices.pct_change().dropna()
+    if returns.empty:
+        st.error("Unable to compute returns for the selected assets.")
+        return
+
+    # Annualized stats
+    ann_factor = 252
+    mu = returns.mean() * ann_factor
+    cov = returns.cov() * ann_factor
+
+    # Monte Carlo portfolio search (long-only)
+    np.random.seed(42)
+    k = returns.shape[1]
+    W = np.random.dirichlet(np.ones(k), size=int(n_portfolios))  # (n, k)
+    port_ret = W @ mu.values
+    port_var = np.einsum("ij,jk,ik->i", W, cov.values, W)
+    port_vol = np.sqrt(np.maximum(port_var, 1e-12))
+    port_sharpe = (port_ret - rf) / np.maximum(port_vol, 1e-12)
+
+    if objective == "Max Sharpe":
+        best_i = int(np.nanargmax(port_sharpe))
+    elif objective == "Min Volatility":
+        best_i = int(np.nanargmin(port_vol))
+    else:  # Max Return
+        best_i = int(np.nanargmax(port_ret))
+
+    best_w = W[best_i]
+    best_ret = float(port_ret[best_i])
+    best_vol = float(port_vol[best_i])
+    best_sharpe = float(port_sharpe[best_i])
+
+    weights_df = pd.DataFrame(
+        {
+            "Asset": list(prices.columns),
+            "Symbol": list(prices.columns),
+            "Weight (%)": (best_w * 100.0),
+        }
+    ).sort_values("Weight (%)", ascending=False)
+    weights_df["Weight (%)"] = weights_df["Weight (%)"].map(lambda x: float(f"{x:.2f}"))
+
+    st.markdown("### ✅ Optimized Portfolio")
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.metric("Expected Return (annual)", f"{best_ret*100:.2f}%")
+    with m2:
+        st.metric("Volatility (annual)", f"{best_vol*100:.2f}%")
+    with m3:
+        st.metric("Sharpe (vs RF)", f"{best_sharpe:.2f}")
+
     col1, col2 = st.columns(2)
-    
     with col1:
-        st.subheader("🎯 Portfolio Allocation")
-        # Sample pie chart
-        labels = ['Stocks', 'Bonds', 'Cash', 'Commodities']
-        values = [40, 30, 20, 10]
-        fig = go.Figure(data=[go.Pie(labels=labels, values=values)])
-        st.plotly_chart(fig, width='stretch')
-    
+        st.subheader("🎯 Allocation")
+        pie = go.Figure(
+            data=[
+                go.Pie(
+                    labels=weights_df["Asset"],
+                    values=weights_df["Weight (%)"],
+                    hole=0.35,
+                )
+            ]
+        )
+        pie.update_layout(template="plotly_dark", height=420, margin=dict(l=20, r=20, t=30, b=20))
+        st.plotly_chart(pie, use_container_width=True)
+        st.dataframe(weights_df, width="stretch", hide_index=True)
+
     with col2:
-        st.subheader("📈 Portfolio Performance")
-        # Sample line chart
-        dates = pd.date_range(start=start_date, end=end_date, freq='D')
-        portfolio_value = 10000 * (1 + np.random.normal(0.0005, 0.02, len(dates))).cumprod()
-        
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=dates, y=portfolio_value, name='Portfolio Value'))
-        fig.update_layout(title='Portfolio Value Over Time')
-        st.plotly_chart(fig, width='stretch')
+        st.subheader("📈 Simulated Efficient Frontier")
+        ef = go.Figure()
+        ef.add_trace(
+            go.Scatter(
+                x=port_vol * 100.0,
+                y=port_ret * 100.0,
+                mode="markers",
+                marker=dict(
+                    size=4,
+                    color=port_sharpe,
+                    colorscale="Viridis",
+                    showscale=True,
+                    colorbar=dict(title="Sharpe"),
+                ),
+                name="Portfolios",
+            )
+        )
+        ef.add_trace(
+            go.Scatter(
+                x=[best_vol * 100.0],
+                y=[best_ret * 100.0],
+                mode="markers",
+                marker=dict(size=12, color="#ff4b4b", symbol="star"),
+                name="Selected",
+            )
+        )
+        ef.update_layout(
+            template="plotly_dark",
+            height=420,
+            xaxis_title="Volatility (annual, %)",
+            yaxis_title="Return (annual, %)",
+            margin=dict(l=20, r=20, t=30, b=20),
+        )
+        st.plotly_chart(ef, use_container_width=True)
+
+    st.markdown("### 📉 Backtested Portfolio Value (weight-rebalanced daily)")
+    daily_port_ret = (returns.values @ best_w)
+    portfolio_value = pd.Series(initial_capital * (1.0 + daily_port_ret).cumprod(), index=returns.index, name="Portfolio Value")
+
+    pv_fig = go.Figure()
+    pv_fig.add_trace(go.Scatter(x=portfolio_value.index, y=portfolio_value.values, name="Portfolio Value", line=dict(width=2)))
+    pv_fig.update_layout(template="plotly_dark", height=420, xaxis_title="Date", yaxis_title="Value (₹)")
+    st.plotly_chart(pv_fig, use_container_width=True)
 
 def show_about():
     """About page"""
